@@ -3,7 +3,6 @@ package client
 import (
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"time"
@@ -11,11 +10,24 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// how will you identify every unique client?
+type clientInfo struct {
+	userName  string
+	ipAddress string
+}
+
 type WebSocketClient struct {
 	conn *websocket.Conn
 }
 
-func (wc *WebSocketClient) connect(uri string) {
+// this function connects the client to the server
+func (wc *WebSocketClient) Connect(uri string) {
+
+	/*
+		send an http request to the websocket server which will then upgrade it to
+		a websocket connection.
+
+	*/
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
@@ -83,48 +95,56 @@ func (wc *WebSocketClient) connect(uri string) {
 			return
 		}
 	}
+
 }
 
-func (wc *WebSocketClient) announcePresence() error {
-	hostname, err := os.Hostname()
+// discover all the clients in the network which have called the -connect() function
+func Discover() {
+	/*
+		the connect() function does the job of discovering all the clients
+		this function will fetch the connected clients and display
+	*/
+
+}
+
+// function to send the file to the desired client
+func Send(receiver string, inputFilePath string) {
+	//function will require unique identifier of a client to send it
+}
+
+// cuts off the connection of this client with the websocket server
+func (client *WebSocketClient) Disconnect() {
+	deadline := time.Now().Add(time.Minute)
+	err := client.conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		deadline,
+	)
 	if err != nil {
-		return err
+		fmt.Printf("Error in WriteControl: %s", err)
+		return
 	}
 
-	addrs, err := net.InterfaceAddrs()
+	// Set deadline for reading the next message
+	err = client.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if err != nil {
-		return err
+		fmt.Printf("Error in SetReadDeadline: %s", err)
+		return
 	}
-
-	var ip string
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				ip = ipnet.IP.String()
-				break
-			}
+	// Read messages until the close message is confirmed
+	for {
+		_, _, err = client.conn.NextReader()
+		if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+			break
+		}
+		if err != nil {
+			break
 		}
 	}
-
-	if ip == "" {
-		return fmt.Errorf("unable to determine local IP address")
-	}
-
-	message := fmt.Sprintf(`{"type":"announce","hostname":"%s","ip":"%s"}`, hostname, ip)
-	err = wc.conn.WriteMessage(websocket.TextMessage, []byte(message))
+	// Close the TCP connection
+	err = client.conn.Close()
 	if err != nil {
-		return err
+		fmt.Printf("Error closing the TCP connection: %s", err)
+		return
 	}
-
-	log.Printf("sent: %s", message)
-	return nil
-}
-
-func main() {
-	// Replace with your WebSocket server URI
-	serverURI := "localhost:8080/ws"
-	wc := WebSocketClient{}
-
-	// Connect to WebSocket server
-	wc.connect(serverURI)
 }
