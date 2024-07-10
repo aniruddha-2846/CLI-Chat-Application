@@ -2,14 +2,16 @@ package server
 
 import (
 	"log"
+	"net"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
 
-var clients = make(map[*websocket.Conn]bool) // connected clients
-var broadcast = make(chan Message)           // broadcast channel
-var upgrader = websocket.Upgrader{}
+var clients = make(map[*websocket.Conn]string) // connected clients
+var clientsLock sync.Mutex
+var connectionCounter int
 
 // Message object
 type Message struct {
@@ -18,32 +20,19 @@ type Message struct {
 	IP       string `json:"ip"`
 }
 
-func handleConnections(w http.ResponseWriter, r *http.Request) {
-	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer ws.Close()
-
-	clients[ws] = true
-
-	for {
-		var msg Message
-		err := ws.ReadJSON(&msg)
-		if err != nil {
-			log.Printf("error: %v", err)
-			delete(clients, ws)
-			break
-		}
-
-		broadcast <- msg
-	}
+func deleteClient(ws *websocket.Conn) {
+	clientsLock.Lock()
+	delete(clients, ws)
+	connectionCounter--
+	clientsLock.Unlock()
 }
 
-func handleMessages() {
-	for {
-		msg := <-broadcast
-		for client := range clients {
+func broadcastMessage(sender *websocket.Conn, network string, msg map[string]interface{}) {
+	clientsLock.Lock()
+	defer clientsLock.Unlock()
+
+	for client, clientNetwork := range clients {
+		if client != sender && clientNetwork == network {
 			err := client.WriteJSON(msg)
 			if err != nil {
 				log.Printf("error: %v", err)
@@ -53,16 +42,52 @@ func handleMessages() {
 		}
 	}
 }
+func handleConnections(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer ws.Close()
+
+	// Get the client's IP address and port number
+	clientAddr := ws.RemoteAddr().(*net.TCPAddr)
+	clientIP := clientAddr.IP.String()
+	clientPort := clientAddr.Port
+
+	connectionCounter++
+	log.Printf("New connection from %s:%d, Total connections: %d", clientIP, clientPort, connectionCounter)
+
+	network := r.URL.Query().Get("network")
+	if network == "" {
+		network = "default"
+	}
+
+	clientsLock.Lock()
+	clients[ws] = network
+	clientsLock.Unlock()
+
+	for {
+		var msg map[string]interface{}
+		err := ws.ReadJSON(&msg)
+		if err != nil {
+			log.Printf("error: %v", err)
+			deleteClient(ws)
+			break
+		}
+		log.Printf("Received message from %s: %v", network, msg)
+		broadcastMessage(ws, network, msg)
+	}
+}
 
 func main() {
-	fs := http.FileServer(http.Dir("./public"))
-	http.Handle("/", fs)
-
 	http.HandleFunc("/ws", handleConnections)
-
-	go handleMessages()
-
-	log.Println("http server started on :8080")
+	log.Println("WebSocket server started on :8080")
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
